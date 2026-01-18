@@ -1,50 +1,86 @@
-import io
+import streamlit as st
 import numpy as np
 import cv2
 from PIL import Image
-import streamlit as st
 
-st.set_page_config(page_title="Bilge Blur Demo", page_icon="📷", layout="centered")
+st.set_page_config(page_title="Bilge Face Blur", page_icon="📷", layout="centered")
 
-st.title("📷 Bilge Blur Demo")
-st.caption("Bir fotoğraf seç → blur seviyesini ayarla → sonucu indir.")
+st.title("📷 Bilge Face Blur Demo")
+st.write("Bir fotoğraf yükle → yüz(leri) otomatik bulsun → sadece yüzleri blur’lasın.")
+
+# --- Ayarlar ---
+blur_strength = st.slider("Blur seviyesi", 1, 50, 15)  # 1..50
+expand = st.slider("Yüz kutusunu büyüt (px)", 0, 80, 20)
 
 uploaded = st.file_uploader("Fotoğraf yükle (jpg/png)", type=["jpg", "jpeg", "png"])
 
-blur = st.slider("Blur seviyesi", 1, 51, 11, step=2)  # tek sayılar daha iyi
+def ensure_odd(k: int) -> int:
+    # GaussianBlur için kernel tek sayı olmalı
+    return k if k % 2 == 1 else k + 1
 
-def pil_to_cv(img_pil: Image.Image) -> np.ndarray:
-    rgb = np.array(img_pil)
-    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-
-def cv_to_pil(img_cv: np.ndarray) -> Image.Image:
-    rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(rgb)
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
 if uploaded:
-    img_pil = Image.open(uploaded).convert("RGB")
-    img_cv = pil_to_cv(img_pil)
+    pil_img = Image.open(uploaded).convert("RGB")
+    img_rgb = np.array(pil_img)
 
-    blurred_cv = cv2.GaussianBlur(img_cv, (blur, blur), 0)
-    blurred_pil = cv_to_pil(blurred_cv)
+    # OpenCV BGR formatına çevir
+    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Önce")
-        st.image(img_pil, use_container_width=True)
+    # Haar cascade (OpenCV içinde hazır gelir)
+    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    face_cascade = cv2.CascadeClassifier(cascade_path)
 
-    with col2:
-        st.subheader("Sonra")
-        st.image(blurred_pil, use_container_width=True)
+    # Yüzleri bul
+    faces = face_cascade.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=5,
+        minSize=(40, 40)
+    )
 
-    # download
+    output = img_bgr.copy()
+
+    if len(faces) == 0:
+        st.warning("Yüz bulunamadı. Daha net bir fotoğraf deneyebilir misin?")
+    else:
+        for (x, y, w, h) in faces:
+            # Kutuyu biraz büyüt (daha iyi gizleme)
+            x1 = clamp(x - expand, 0, output.shape[1] - 1)
+            y1 = clamp(y - expand, 0, output.shape[0] - 1)
+            x2 = clamp(x + w + expand, 0, output.shape[1])
+            y2 = clamp(y + h + expand, 0, output.shape[0])
+
+            face_roi = output[y1:y2, x1:x2]
+
+            k = ensure_odd(blur_strength)
+            blurred_face = cv2.GaussianBlur(face_roi, (k, k), 0)
+
+            output[y1:y2, x1:x2] = blurred_face
+
+        st.success(f"Bulunan yüz sayısı: {len(faces)}")
+
+    # Sonucu RGB'ye geri çevir
+    out_rgb = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Orijinal")
+        st.image(img_rgb, use_container_width=True)
+    with c2:
+        st.subheader("Yüzler Blur")
+        st.image(out_rgb, use_container_width=True)
+
+    # İndirme
+    out_pil = Image.fromarray(out_rgb)
+    import io
     buf = io.BytesIO()
-    blurred_pil.save(buf, format="PNG")
+    out_pil.save(buf, format="PNG")
     st.download_button(
         "⬇️ Blur’lu görseli indir (PNG)",
         data=buf.getvalue(),
-        file_name="bilge_blur.png",
+        file_name="bilge_face_blur.png",
         mime="image/png"
     )
-else:
-    st.info("Yukarıdan bir fotoğraf yükle. Sonuç sağda görünecek.")
