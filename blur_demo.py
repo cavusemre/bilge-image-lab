@@ -2,121 +2,151 @@ import streamlit as st
 import numpy as np
 import cv2
 from PIL import Image
-from pathlib import Path
 
 st.set_page_config(page_title="Bilge Privacy Lab", page_icon="🛡️", layout="wide")
 
 st.title("🛡️ Bilge Privacy Lab")
-st.caption("Fotoğraf yükle → yüz bul → gizle → indir (Cloud uyumlu)")
+st.caption("Fotoğraf yükle → yüzleri otomatik bul → gizle → indir (Streamlit Cloud uyumlu)")
 
-# --- Cascade yükle (repo içinden) ---
-CASCADE_PATH = Path(__file__).parent / "assets" / "haarcascade_frontalface_default.xml"
-face_cascade = cv2.CascadeClassifier(str(CASCADE_PATH))
+# -----------------------------
+# Helpers
+# -----------------------------
+@st.cache_resource
+def get_face_cascade():
+    # OpenCV'nin kendi paket içi haarcascade yolu (ek dosya gerektirmez)
+    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    c = cv2.CascadeClassifier(cascade_path)
+    return c
 
-if face_cascade.empty():
-    st.error("Cascade dosyası yüklenemedi. assets/haarcascade_frontalface_default.xml repoda olmalı.")
+def pil_to_bgr(pil_img: Image.Image) -> np.ndarray:
+    rgb = np.array(pil_img.convert("RGB"))
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+def bgr_to_pil(bgr: np.ndarray) -> Image.Image:
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(rgb)
+
+def resize_if_needed(bgr: np.ndarray, max_side: int = 1400) -> np.ndarray:
+    h, w = bgr.shape[:2]
+    m = max(h, w)
+    if m <= max_side:
+        return bgr
+    scale = max_side / m
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    return cv2.resize(bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+def blur_roi(bgr: np.ndarray, x: int, y: int, w: int, h: int, k: int) -> None:
+    roi = bgr[y:y+h, x:x+w]
+    if roi.size == 0:
+        return
+    k = max(3, k)
+    if k % 2 == 0:
+        k += 1
+    bgr[y:y+h, x:x+w] = cv2.GaussianBlur(roi, (k, k), 0)
+
+def pixelate_roi(bgr: np.ndarray, x: int, y: int, w: int, h: int, block: int) -> None:
+    roi = bgr[y:y+h, x:x+w]
+    if roi.size == 0:
+        return
+    block = max(4, int(block))
+    small_w = max(1, w // block)
+    small_h = max(1, h // block)
+    temp = cv2.resize(roi, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+    bgr[y:y+h, x:x+w] = cv2.resize(temp, (w, h), interpolation=cv2.INTER_NEAREST)
+
+def detect_faces(gray: np.ndarray, scaleFactor: float, minNeighbors: int, minSize: int):
+    cascade = get_face_cascade()
+    faces = cascade.detectMultiScale(
+        gray,
+        scaleFactor=scaleFactor,
+        minNeighbors=minNeighbors,
+        minSize=(minSize, minSize),
+    )
+    return faces
+
+# -----------------------------
+# UI
+# -----------------------------
+with st.sidebar:
+    st.header("Kontroller")
+
+    mode = st.selectbox("Gizleme tipi", ["Gaussian Blur", "Pixelate"], index=0)
+
+    blur_k = st.slider("Blur gücü (tek sayı)", 3, 99, 31, step=2)
+    pixel_block = st.slider("Piksel blok boyutu", 4, 50, 14)
+
+    st.divider()
+    st.subheader("Yüz algılama")
+    min_face = st.slider("Min yüz boyutu", 20, 200, 40)
+    scaleFactor = st.slider("scaleFactor (hassasiyet)", 1.05, 1.50, 1.20, step=0.01)
+    minNeighbors = st.slider("minNeighbors (filtre)", 1, 10, 4)
+
+    show_boxes = st.toggle("Yüz kutularını göster", value=True)
+    background_blur = st.toggle("Arka plan blur (yüz net değil, yüz gizli)", value=False)
+    bg_blur_k = st.slider("Arka plan blur gücü", 3, 99, 21, step=2)
+
+st.write("### Fotoğraf yükle")
+uploaded = st.file_uploader("JPG/PNG yükle", type=["jpg", "jpeg", "png"])
+
+if not uploaded:
+    st.info("Bir görsel yükleyince yüz algılama başlayacak.")
     st.stop()
 
-# --- Sol panel kontroller ---
-st.sidebar.header("Kontroller")
+# Büyük görseller Streamlit Cloud’da bazen 1 dk sonra düşürür → önce küçültüyoruz
+pil_img = Image.open(uploaded)
+bgr = pil_to_bgr(pil_img)
+bgr = resize_if_needed(bgr, max_side=1400)
 
-child_mode = st.sidebar.toggle("👶 Child Privacy Mode (daha agresif)", value=True)
-show_boxes = st.sidebar.toggle("🟩 Yüz kutularını göster", value=False)
-bg_blur_mode = st.sidebar.toggle("🌫️ Arka plan blur (yüz net)", value=False)
+gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
-mask_type = st.sidebar.selectbox("Yüz gizleme tipi", ["Gaussian", "Pixelate"], index=0)
+faces = detect_faces(gray, scaleFactor=scaleFactor, minNeighbors=minNeighbors, minSize=min_face)
 
-min_face = st.sidebar.slider("Min yüz boyutu", 20, 120, 30, 1)
-scale_factor = st.sidebar.slider("scaleFactor", 105, 150, 120, 1) / 100.0  # 1.05 - 1.50
-min_neighbors = st.sidebar.slider("minNeighbors", 3, 12, 4, 1)
+processed = bgr.copy()
 
-blur_strength = st.sidebar.slider("Blur gücü (tek sayı)", 7, 61, 31, 2)  # tek sayı
-pixel_size = st.sidebar.slider("Pixel boyutu", 6, 40, 14, 1)
+# Arka plan blur (isteğe bağlı)
+if background_blur:
+    k = bg_blur_k
+    if k % 2 == 0:
+        k += 1
+    processed = cv2.GaussianBlur(processed, (k, k), 0)
+    # sonra yüz bölgelerini orijinalden alıp ÜSTÜNE gizleme uygulayacağız (yani arka plan blur + yüz gizli)
+    # Burada zaten processed blur'lu; yüz ROI'sini tekrar işleyeceğiz.
 
-# Child mode agresif ayar (otomatik güçlendirme)
-if child_mode:
-    blur_strength = max(blur_strength, 41)
-    min_face = min(min_face, 30)
-    min_neighbors = max(min_neighbors, 4)
+# Yüzleri gizle
+for (x, y, w, h) in faces:
+    pad = int(0.15 * w)
+    x2 = max(0, x - pad)
+    y2 = max(0, y - pad)
+    w2 = min(processed.shape[1] - x2, w + 2 * pad)
+    h2 = min(processed.shape[0] - y2, h + 2 * pad)
 
-# --- Upload ---
-uploaded = st.file_uploader("📤 Fotoğraf yükle (JPG/PNG)", type=["jpg", "jpeg", "png"])
+    if mode == "Gaussian Blur":
+        blur_roi(processed, x2, y2, w2, h2, blur_k)
+    else:
+        pixelate_roi(processed, x2, y2, w2, h2, pixel_block)
 
-def pixelate_roi(roi, block_size=14):
-    h, w = roi.shape[:2]
-    if h <= 0 or w <= 0:
-        return roi
-    small = cv2.resize(roi, (max(1, w // block_size), max(1, h // block_size)), interpolation=cv2.INTER_LINEAR)
-    return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
-
-def apply_face_hide(img_bgr, faces):
-    out = img_bgr.copy()
-
-    # Arka plan blur modu: önce tüm görüntüyü blurla, sonra yüzleri orijinalden geri koy
-    if bg_blur_mode:
-        k = blur_strength if blur_strength % 2 == 1 else blur_strength + 1
-        blurred_all = cv2.GaussianBlur(out, (k, k), 0)
-        # yüzleri net bırakacağız
-        for (x, y, w, h) in faces:
-            blurred_all[y:y+h, x:x+w] = out[y:y+h, x:x+w]
-        out = blurred_all
-        return out
-
-    # Normal: yüzleri gizle
-    for (x, y, w, h) in faces:
-        roi = out[y:y+h, x:x+w]
-        if mask_type == "Gaussian":
-            k = blur_strength if blur_strength % 2 == 1 else blur_strength + 1
-            roi2 = cv2.GaussianBlur(roi, (k, k), 0)
-        else:
-            roi2 = pixelate_roi(roi, pixel_size)
-        out[y:y+h, x:x+w] = roi2
-    return out
-
-if uploaded:
-    image = Image.open(uploaded).convert("RGB")
-    img_rgb = np.array(image)
-    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-
-    faces = face_cascade.detectMultiScale(
-        gray,
-        scaleFactor=scale_factor,
-        minNeighbors=min_neighbors,
-        minSize=(min_face, min_face)
-    )
-
-    st.write(f"✅ Bulunan yüz sayısı: **{len(faces)}**")
-
-    out_bgr = apply_face_hide(img_bgr, faces)
-
-    # kutu gösterme (debug)
     if show_boxes:
-        for (x, y, w, h) in faces:
-            cv2.rectangle(out_bgr, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        cv2.rectangle(processed, (x2, y2), (x2 + w2, y2 + h2), (0, 255, 0), 2)
 
-    out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+col1, col2 = st.columns(2)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Orijinal")
-        st.image(img_rgb, use_column_width=True)
-    with col2:
-        st.subheader("Gizlenmiş")
-        st.image(out_rgb, use_column_width=True)
+with col1:
+    st.write("### Orijinal")
+    st.image(bgr_to_pil(bgr), use_container_width=True)
 
-    # --- İNDİRME BUTONU ---
-    out_pil = Image.fromarray(out_rgb)
-    import io
-    buf = io.BytesIO()
-    out_pil.save(buf, format="PNG")
-    st.download_button(
-        "⬇️ Gizlenmiş fotoğrafı indir (PNG)",
-        data=buf.getvalue(),
-        file_name="bilge_privacy.png",
-        mime="image/png"
-    )
+with col2:
+    st.write(f"### Gizlenmiş (Bulunan yüz: {len(faces)})")
+    out_pil = bgr_to_pil(processed)
+    st.image(out_pil, use_container_width=True)
 
-else:
-    st.info("Bir fotoğraf yükleyince otomatik yüz algılama + gizleme başlayacak.")
+# İndir
+out_bytes = np.array(out_pil.convert("RGB"))
+# PNG indir (kalite kaybı yok)
+_, png = cv2.imencode(".png", cv2.cvtColor(out_bytes, cv2.COLOR_RGB2BGR))
+st.download_button(
+    "⬇️ PNG olarak indir",
+    data=png.tobytes(),
+    file_name="bilge_privacy.png",
+    mime="image/png",
+)
