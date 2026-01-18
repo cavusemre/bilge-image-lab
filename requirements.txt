@@ -1,1 +1,1 @@
-sreamlit pillow opencv-python-headless numpy
+streamlit==1.30.0 pillow==10.2.0 opencv-python-headless==4.8.1.78 numpy==1.26.4
