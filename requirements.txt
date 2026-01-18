@@ -1,0 +1,1 @@
+sreamlit pillow opencv-python-headless numpy
