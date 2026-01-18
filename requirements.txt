@@ -1,1 +1,4 @@
-streamlit==1.30.0pillow==10.2.0opencv-python-headless==4.8.1.78numpy==1.26.4
+streamlit
+pillow
+opencv-python-headless
+numpy
